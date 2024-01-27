@@ -307,7 +307,7 @@ impl State {
     fn insert(&mut self, id: lexer::Id, term: Term) -> Result<()> {
         match &term {
             Term::Proof { decl, conclusion, .. } if decl.as_str() == "asserted" => {
-                println!("assert {}", self.view_id(&conclusion));
+                // println!("assert {}", self.view_id(&conclusion));
             }
             _ => {}
         }
@@ -364,6 +364,65 @@ impl State {
         }
     }
 
+    fn explain_equality(&self, left: &Id, eq_expl: &EqExpl, right: &Id, indent_size: usize) {
+        let indent: String = "  ".repeat(indent_size);
+
+        match eq_expl {
+            EqExpl::Root => {
+                println!("{}It is the root node in the E-graph", indent);
+            }
+            EqExpl::Literal { equality, id } => {
+                println!("{}They are directly proven equal", indent);
+            }
+            EqExpl::Axiom(_) => {
+                println!("{}(proof generation disabled)", indent);
+            }
+            EqExpl::CongruenceOrCommutativity { args, id } => {
+                let Term::App { decl: left_f, .. } = self.get(left) else { todo!() };
+                let Term::App { decl: right_f, .. } = self.get(right) else { todo!() };
+                assert!(left_f == right_f);
+                println!("{}Both terms apply {}, and their arguments are equal:", indent, left_f);
+                for sub in args {
+                    self.explain_substitution(sub, indent_size+1);
+                }
+            }
+            EqExpl::Theory { name, id } => {
+                println!("{}Theory {} deems it so", indent, name);
+            }
+            EqExpl::Unknown(_) => {
+                println!("{}An unknown theory solver deems it so", indent);
+            }
+        }
+    }
+
+    fn explain_substitution(&self, sub: &Substitution, indent_size: usize) {
+        let indent = "  ".repeat(indent_size);
+
+        match sub {
+            Substitution::None(root) => {
+                println!("{}top level pattern term:", indent);
+                self.explain_term(root, indent_size+1)
+            },
+            Substitution::Sub(here, for_pat) => {
+                let eq_expl = self.get(here).get_eq_expl().as_ref().unwrap();
+                let eq_expl_pat = self.get(for_pat).get_eq_expl().as_ref().unwrap();
+
+                if(here == for_pat) {
+                    println!("{}matching substitution:", indent);
+                    self.explain_term(here, indent_size+1);
+                } else {
+                    println!("{}replacing:", indent);
+                    self.explain_term(here, indent_size+1);
+                    println!("{}with:", indent);
+                    self.explain_term(for_pat, indent_size+1);
+                }
+
+                println!("{}substitution allowed because:", indent);
+                self.explain_equality(here, eq_expl, for_pat, indent_size+1);
+            }
+        }
+    }
+
     fn explain_inst(&self, inst: &Instantiation, indent_size: usize) {
         let indent: String = "  ".repeat(indent_size);
 
@@ -373,22 +432,11 @@ impl State {
                 self.print_bindings(quantifier, bindings, &indent);
                 println!("{}pattern: {}", indent, self.view_id(pattern));
                 for sub in blame {
-                    match sub {
-                        Substitution::None(root) => {
-                            self.explain_term(root, indent_size+1)
-                        },
-                        Substitution::Sub(here, for_pat) => {
-                            println!("{}replacing:", indent);
-                            self.explain_term(here, indent_size+1);
-                            println!("{}with:", indent);
-                            self.explain_term(for_pat, indent_size+1);
-                            assert!(self.get(here).get_eq_expl().is_some());
-                        }
-                    }
+                    self.explain_substitution(sub, indent_size);
                 }
             }
             Instantiation::Theory(TheoryInstantiation { family, bindings, blame }) => {
-                println!("{}(theory instantiation)", indent)
+                // println!("{}(theory instantiation)", indent)
             }
             Instantiation::Model(ModelInstantiation { quantifier, bindings }) => {
                 println!("{}model instantiation:", indent);

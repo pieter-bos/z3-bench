@@ -9,7 +9,7 @@ use std::env;
 use std::fs::File;
 use std::path::Path;
 use interprocess::local_socket::{LocalSocketListener, LocalSocketStream};
-use crate::log::parser::Parser;
+use crate::log::parser::{Error, Parser};
 use crate::log::state::State;
 
 const SOCKET_NAME: &'static str = "z3-bench.socket";
@@ -23,14 +23,17 @@ fn read_file(path: &'static str) {
 
     while let (Some(entry), errs) = parser.fuzzy_next().unwrap() {
         for err in errs {
-            println!("{:?}", err);
+            match err {
+                Error::UnexpectedToken(_) => {},
+                err => println!("{:?}", err),
+            }
         }
         state.process(entry).unwrap();
     }
 }
 
 fn main() {
-    read_file("/home/pieter/Downloads/z3(3).log");
+    read_file("/home/pieter/Downloads/z3(2).log");
     return;
 
     let path = env::temp_dir().join(Path::new(SOCKET_NAME));
