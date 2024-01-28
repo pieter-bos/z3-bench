@@ -428,11 +428,45 @@ impl State {
 
         match inst {
             Instantiation::Match(MatchInstantiation { quantifier, bindings, pattern, blame }) => {
-                println!("{}{}", indent, self.view_id(quantifier));
-                self.print_bindings(quantifier, bindings, &indent);
-                println!("{}pattern: {}", indent, self.view_id(pattern));
+                let mut match_term: Vec<&Term> = Vec::new();
                 for sub in blame {
-                    self.explain_substitution(sub, indent_size);
+                    match sub {
+                        Substitution::None(id) => match_term.push(self.get(id)),
+                        Substitution::Sub(_, _) => {},
+                    }
+                }
+
+                let mut pattern_term: Vec<&Term> = Vec::new();
+                match self.get(pattern) {
+                    Term::App { decl, args, .. } if decl == "pattern" => {
+                        for arg in args {
+                            pattern_term.push(self.get(arg));
+                        }
+                    }
+                    _ => {}
+                };
+
+                let mut ok = true;
+
+                for (match_term, pattern_term) in match_term.iter().zip(pattern_term.iter()) {
+                    match (match_term, pattern_term) {
+                        (Term::App { decl: match_decl, .. }, Term::App { decl: pattern_decl, .. }) => {
+                            if match_decl != pattern_decl {
+                                ok = false
+                            }
+                        }
+                        _ => ok = false,
+                    }
+                }
+
+                if(!ok) {
+                    println!("{}{}", indent, self.view_id(quantifier));
+                    self.print_bindings(quantifier, bindings, &indent);
+                    println!("{}pattern: {}", indent, self.view_id(pattern));
+
+                    for sub in blame {
+                        self.explain_substitution(sub, indent_size);
+                    }
                 }
             }
             Instantiation::Theory(TheoryInstantiation { family, bindings, blame }) => {
@@ -509,9 +543,9 @@ impl State {
                 term.set_meaning(s_meaning)?;
             },
             Entry::DecideAndOr(id1, id2) => {
-                println!("== Case Split ==");
-                println!("{}", self.view_id(&self.new_id(id1)?));
-                println!("{}", self.view_id(&self.new_id(id2)?));
+                // println!("== Case Split ==");
+                // println!("{}", self.view_id(&self.new_id(id1)?));
+                // println!("{}", self.view_id(&self.new_id(id2)?));
             },
             Entry::TheoryInstanceDiscovered { ptr, axiom, bindings, blame } => {
                 self.insert_instantiation(ptr, Instantiation::Theory(TheoryInstantiation {

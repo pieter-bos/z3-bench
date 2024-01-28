@@ -33,7 +33,7 @@ fn read_file(path: &'static str) {
 }
 
 fn main() {
-    read_file("/home/pieter/Downloads/z3(2).log");
+    read_file("/home/pieter/vercors/z3.log");
     return;
 
     let path = env::temp_dir().join(Path::new(SOCKET_NAME));
