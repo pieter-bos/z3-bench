@@ -23,7 +23,10 @@ fn read_file(path: &'static str) {
 
     while let (Some(entry), errs) = parser.fuzzy_next().unwrap() {
         for err in errs {
-            println!("{:?}", err);
+            match err {
+                log::parser::Error::UnexpectedToken(_) => {},
+                err => println!("{:?}", err),
+            }
         }
         match state.process(entry) {
             Ok(_) => {}

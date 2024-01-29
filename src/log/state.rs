@@ -367,7 +367,7 @@ impl State {
     fn insert(&mut self, id: lexer::Id, term: Term) -> Result<()> {
         match &term {
             Term::Proof { decl, conclusion, .. } if decl.as_str() == "asserted" => {
-                println!("assert {}", self.view_id(&conclusion));
+                // println!("assert {}", self.view_id(&conclusion));
             }
             _ => {}
         }
@@ -427,26 +427,112 @@ impl State {
         }
     }
 
+    fn explain_equality(&self, left: &Id, eq_expl: &EqExpl, right: &Id, indent_size: usize) -> Result<()> {
+        let indent: String = "  ".repeat(indent_size);
+
+        match eq_expl {
+            EqExpl::Root => {
+                println!("{}It is the root node in the E-graph", indent);
+            }
+            EqExpl::Literal { id, .. } | EqExpl::ProofOfRewrite { id } => {
+                println!("{}They are directly proven equal", indent);
+            }
+            EqExpl::Axiom(_) => {
+                println!("{}(proof generation disabled)", indent);
+            }
+            EqExpl::CongruenceOrCommutativity { args, id } | EqExpl::ProofOfCongruence { args, id } => {
+                let Term::App { decl: left_f, .. } = self.get(left) else { todo!() };
+                let Term::App { decl: right_f, .. } = self.get(right) else { todo!() };
+                assert!(left_f == right_f);
+                println!("{}Both terms apply {}, and their arguments are equal:", indent, left_f);
+                for sub in args {
+                    self.explain_substitution(sub, indent_size+1)?;
+                }
+            }
+            EqExpl::Theory { name, id } => {
+                println!("{}Theory {} deems it so", indent, name);
+            }
+            EqExpl::Unknown(_) => {
+                println!("{}An unknown theory solver deems it so", indent);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn explain_substitution(&self, sub: &Substitution, indent_size: usize) -> Result<()> {
+        let indent = "  ".repeat(indent_size);
+
+        match sub {
+            Substitution::None(root) => {
+                println!("{}top level pattern term:", indent);
+                self.explain_term(root, indent_size+1)?
+            },
+            Substitution::Sub(here, for_pat) => {
+                let eq_expl = self.get(here).get_eq_expl().as_ref().unwrap();
+                let eq_expl_pat = self.get(for_pat).get_eq_expl().as_ref().unwrap();
+
+                if here == for_pat {
+                    println!("{}matching substitution:", indent);
+                    self.explain_term(here, indent_size+1)?;
+                } else {
+                    println!("{}replacing:", indent);
+                    self.explain_term(here, indent_size+1)?;
+                    println!("{}with:", indent);
+                    self.explain_term(for_pat, indent_size+1)?;
+                }
+
+                println!("{}substitution allowed because:", indent);
+                self.explain_equality(here, eq_expl, for_pat, indent_size+1)?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn explain_inst(&self, inst: &Instantiation, indent_size: usize) -> Result<()> {
         let indent: String = "  ".repeat(indent_size);
 
         match inst {
             Instantiation::Match(MatchInstantiation { quantifier, bindings, pattern, blame }) => {
-                println!("{}{}", indent, self.view_id(quantifier));
-                self.print_bindings(quantifier, bindings, &indent)?;
-                println!("{}pattern: {}", indent, self.view_id(pattern));
+                let mut match_term: Vec<&Term> = Vec::new();
                 for sub in blame {
                     match sub {
-                        Substitution::None(root) => {
-                            self.explain_term(root, indent_size+1)?
-                        },
-                        Substitution::Sub(here, for_pat) => {
-                            println!("{}replacing:", indent);
-                            self.explain_term(here, indent_size+1)?;
-                            println!("{}with:", indent);
-                            self.explain_term(for_pat, indent_size+1)?;
-                            assert!(self.get(here).get_eq_expl().is_some());
+                        Substitution::None(id) => match_term.push(self.get(id)),
+                        Substitution::Sub(_, _) => {},
+                    }
+                }
+
+                let mut pattern_term: Vec<&Term> = Vec::new();
+                match self.get(pattern) {
+                    Term::App { decl, args, .. } if decl == "pattern" => {
+                        for arg in args {
+                            pattern_term.push(self.get(arg));
                         }
+                    }
+                    _ => {}
+                };
+
+                let mut ok = true;
+
+                for (match_term, pattern_term) in match_term.iter().zip(pattern_term.iter()) {
+                    match (match_term, pattern_term) {
+                        (Term::App { decl: match_decl, .. }, Term::App { decl: pattern_decl, .. }) => {
+                            if match_decl != pattern_decl {
+                                ok = false
+                            }
+                        }
+                        _ => ok = false,
+                    }
+                }
+
+                if !ok {
+                    println!("{}{}", indent, self.view_id(quantifier));
+                    self.print_bindings(quantifier, bindings, &indent)?;
+                    println!("{}pattern: {}", indent, self.view_id(pattern));
+
+                    for sub in blame {
+                        self.explain_substitution(sub, indent_size)?;
                     }
                 }
             }
@@ -603,9 +689,9 @@ impl State {
                 term.set_meaning(s_meaning)?;
             },
             Entry::DecideAndOr(id1, id2) => {
-                println!("== Case Split ==");
-                println!("{}", self.view_id(&self.new_id(id1)?));
-                println!("{}", self.view_id(&self.new_id(id2)?));
+                // println!("== Case Split ==");
+                // println!("{}", self.view_id(&self.new_id(id1)?));
+                // println!("{}", self.view_id(&self.new_id(id2)?));
             },
             Entry::TheoryInstanceDiscovered { ptr, axiom, bindings, blame } => {
                 self.insert_instantiation(ptr, Instantiation::Theory(TheoryInstantiation {
@@ -639,7 +725,7 @@ impl State {
                             Term::Proof { decl, premises, conclusion } if decl == "quant-inst" && premises.len() == 0 => {
                                 match self.get(conclusion) {
                                     Term::App { decl, args, .. } if decl == "or" && args.len() == 2 => {
-                                        println!("Body: {}", self.view_id(&args[1]));
+                                        // println!("Body: {}", self.view_id(&args[1]));
                                         id = args[1].clone();
                                     }
                                     _ => {},
@@ -671,11 +757,11 @@ impl State {
                                 let mut concrete_term = Some(&id);
 
                                 if !self.term_contains_term(body, &id) {
-                                    println!("!!! Term {} is not in quantifier body {} !!!", self.view_id(body), self.view_id(&id));
+                                    // println!("!!! Term {} is not in quantifier body {} !!!", self.view_id(body), self.view_id(&id));
                                 }
 
                                 while concrete_term.is_some() && !self.term_contains_term(body, concrete_term.unwrap()) {
-                                    println!(">>>> {}", self.view_id(concrete_term.unwrap()));
+                                    // println!(">>>> {}", self.view_id(concrete_term.unwrap()));
                                     concrete_term = self.get(concrete_term.unwrap()).get_reverse_monotonicity().as_ref();
                                 }
 

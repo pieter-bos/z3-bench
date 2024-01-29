@@ -83,7 +83,9 @@ impl<R: Read> Lexer<R> {
                 Char::NoData => return Ok(None),
                 Char::Char('\n') => {
                     self.line += 1;
-                    // println!("line {}", self.line);
+                    if self.line % 100_000 == 0 {
+                        println!("line {}", self.line);
+                    }
                     '\n'
                 },
                 Char::Char(c) => c
