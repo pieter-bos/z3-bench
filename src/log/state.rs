@@ -12,12 +12,16 @@ pub enum Error {
     InsertRange(BigUint),
     MeaningNotForApp(Meaning, Term),
     BlameNotForApp(Blame, Term),
+    InstantiationNotForQuant(Term),
     EqExplNotForApp(EqExpl, Term),
+    ReverseMonoNotForApp(Id, Term),
     VarNamesNotForBinder(Vec<Decl>, Term),
     DuplicateInstance(Instantiation, Instantiation),
     NoSuchInstance(String),
     NestedCurrentInstance(Instantiation, Instantiation),
     NoCurrentInstance,
+    WrongProofShape(Term),
+    TermWithoutBlame(Term),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -86,11 +90,12 @@ pub struct Meta {
     meaning: Option<Meaning>,
     blame: Option<Blame>,
     eq_expl: Option<EqExpl>,
+    reverse_monotonicity: Option<Id>,
 }
 
 impl Meta {
     fn new() -> Self {
-        Self { meaning: None, blame: None, eq_expl: None }
+        Self { meaning: None, blame: None, eq_expl: None, reverse_monotonicity: None }
     }
 }
 
@@ -163,6 +168,26 @@ impl Term {
             _ => Err(Error::EqExplNotForApp(eq_expl, self.clone())),
         }
     }
+
+    pub fn get_reverse_monotonicity(&self) -> &Option<Id> {
+        match self {
+            Term::App { meta, .. } => match meta {
+                None => &None,
+                Some(meta) => &meta.reverse_monotonicity,
+            }
+            _ => &None,
+        }
+    }
+
+    fn set_reverse_monotonicity(&mut self, from: Id) -> Result<()> {
+        match self {
+            Term::App { meta, .. } => {
+                meta.get_or_insert_with(|| Box::new(Meta::new())).reverse_monotonicity = Some(from);
+                Ok(())
+            }
+            _ => Err(Error::ReverseMonoNotForApp(from, self.clone())),
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -173,6 +198,8 @@ pub enum EqExpl {
     CongruenceOrCommutativity { args: Vec<Substitution>, id: Id },
     Theory { name: String, id: Id },
     Unknown(Id),
+    ProofOfRewrite { id: Id },
+    ProofOfCongruence { args: Vec<Substitution>, id: Id },
 }
 
 pub struct State {
@@ -181,7 +208,7 @@ pub struct State {
     family_terms: HashMap<String, Term>,
 
     pending_instances: HashMap<String, Instantiation>,
-    current_instance: Vec<Instantiation>,
+    current_instance: Vec<(Instantiation, Option<Id>)>,
 
     eq_expl: HashMap<Id, EqExpl>,
 }
@@ -206,6 +233,35 @@ impl State {
         }
     }
 
+    fn terms_contain_term(&self, haystacks: &Vec<Id>, needle: &Id) -> bool {
+        for haystack in haystacks {
+            if haystack == needle {
+                return true
+            }
+        }
+
+        for haystack in haystacks {
+            if self.term_contains_term(haystack, needle) {
+                return true
+            }
+        }
+
+        false
+    }
+    fn term_contains_term(&self, haystack: &Id, needle: &Id) -> bool {
+        if haystack == needle {
+            return true
+        }
+
+        match self.get(haystack) {
+            Term::App { args, .. } => self.terms_contain_term(args, needle),
+            Term::Proof { conclusion, .. } => self.term_contains_term(conclusion, needle),
+            Term::Lambda { body, .. } => self.term_contains_term(body, needle),
+            Term::Quant { body, .. } => self.term_contains_term(body, needle),
+            Term::Var(_) => false,
+        }
+    }
+
     fn get_mut(&mut self, id: &Id) -> &mut Term {
         match id {
             Id::Num(n) => self.num_terms[*n].as_mut().unwrap(),
@@ -226,7 +282,7 @@ impl State {
         }
     }
 
-    fn view_id(&self, id: &Id) -> TermView {
+    pub fn view_id(&self, id: &Id) -> TermView {
         self.view_term(self.get(id))
     }
 
@@ -234,7 +290,7 @@ impl State {
         ids.iter().map(|id| self.view_id(id)).collect()
     }
 
-    fn view_term(&self, term: &Term) -> TermView {
+    pub fn view_term(&self, term: &Term) -> TermView {
         match term {
             term if term.get_meaning().is_some() =>
                 TermView::Meaning(term.get_meaning().clone().unwrap()),
@@ -301,6 +357,10 @@ impl State {
     }
 
     fn new_substitutions(&self, subs: Vec<parser::Substitution>) -> Result<Vec<Substitution>> {
+        // When a top term (Sub::None) has a blame, and does not occur in the body induced by it,
+        // try to follow reverse monotonicity steps for that term and add a (Sub::Sub) for that
+        // replacement. The new top term should be the found top term that occurs in the body of
+        // the blamed instantiation.
         subs.into_iter().map(|sub| self.new_substitution(sub)).collect::<Result<Vec<Substitution>>>()
     }
 
@@ -334,72 +394,77 @@ impl State {
         Ok(())
     }
 
-    fn print_bindings(&self, quantifier: &Id, bindings: &Vec<Id>, indent: &String) {
+    fn print_bindings(&self, quantifier: &Id, bindings: &Vec<Id>, indent: &String) -> Result<()> {
         println!("{}with bindings:", indent);
         if let Term::Quant { decls, .. } = self.get(quantifier) {
             for (decl, binding) in decls.iter().zip(bindings) {
                 println!("{}{} = {}", indent, decl, self.view_id(binding));
             }
+            Ok(())
         } else {
-            println!("{}??? not a quantifier ???", indent);
+            Err(Error::InstantiationNotForQuant(self.get(quantifier).clone()))
         }
     }
 
-    fn explain_term(&self, term: &Id, indent_size: usize) {
+    fn explain_term(&self, term: &Id, indent_size: usize) -> Result<()> {
         let indent = "  ".repeat(indent_size);
         println!("{}{}", indent, self.view_id(term));
         match self.get(term).get_blame() {
             None => {
-                println!("{}??? unknown blame ???", indent);
+                println!("{:?}", self.get(term).get_reverse_monotonicity());
+                return Err(Error::TermWithoutBlame(self.get(term).clone()))
             },
             Some(blame) => {
                 match blame {
                     Blame::Assertion => println!("{}(from assertion)", indent),
                     Blame::Instantiation(inst) => {
                         println!("{}from instantiation:", indent);
-                        self.explain_inst(inst, indent_size+1);
+                        self.explain_inst(inst, indent_size+1)?;
                     },
                 }
+                Ok(())
             }
         }
     }
 
-    fn explain_inst(&self, inst: &Instantiation, indent_size: usize) {
+    fn explain_inst(&self, inst: &Instantiation, indent_size: usize) -> Result<()> {
         let indent: String = "  ".repeat(indent_size);
 
         match inst {
             Instantiation::Match(MatchInstantiation { quantifier, bindings, pattern, blame }) => {
                 println!("{}{}", indent, self.view_id(quantifier));
-                self.print_bindings(quantifier, bindings, &indent);
+                self.print_bindings(quantifier, bindings, &indent)?;
                 println!("{}pattern: {}", indent, self.view_id(pattern));
                 for sub in blame {
                     match sub {
                         Substitution::None(root) => {
-                            self.explain_term(root, indent_size+1)
+                            self.explain_term(root, indent_size+1)?
                         },
                         Substitution::Sub(here, for_pat) => {
                             println!("{}replacing:", indent);
-                            self.explain_term(here, indent_size+1);
+                            self.explain_term(here, indent_size+1)?;
                             println!("{}with:", indent);
-                            self.explain_term(for_pat, indent_size+1);
+                            self.explain_term(for_pat, indent_size+1)?;
                             assert!(self.get(here).get_eq_expl().is_some());
                         }
                     }
                 }
             }
             Instantiation::Theory(TheoryInstantiation { family, bindings, blame }) => {
-                println!("{}(theory instantiation)", indent)
+                // println!("{}(theory instantiation)", indent)
             }
             Instantiation::Model(ModelInstantiation { quantifier, bindings }) => {
                 println!("{}model instantiation:", indent);
                 println!("{}{}", indent, self.view_id(quantifier));
-                self.print_bindings(quantifier, bindings, &indent);
+                self.print_bindings(quantifier, bindings, &indent)?;
             }
         }
+
+        Ok(())
     }
 
     fn insert_instantiation(&mut self, ptr: String, inst: Instantiation) -> Result<()> {
-        self.explain_inst(&inst, 0);
+        self.explain_inst(&inst, 0)?;
 
         match self.pending_instances.insert(ptr.clone(), inst.clone()) {
             None => Ok(()),
@@ -414,6 +479,72 @@ impl State {
         }
     }
 
+    fn proof_rewrite_blame(&mut self, premises: &Vec<Id>, conclusion: &Id) -> Result<()> {
+        let (from, to) = {
+            let conclusion = self.get(conclusion);
+
+            match conclusion {
+                Term::App { decl, args, .. }
+                        if (decl == "=" || decl == "~") && args.len() == 2 => {
+                    (args[0].clone(), args[1].clone())
+                },
+
+                other => return Err(Error::WrongProofShape(conclusion.clone())),
+            }
+        };
+
+        match self.get_mut(&to).set_reverse_monotonicity(from.clone()) {
+            Err(Error::ReverseMonoNotForApp(_, _)) => (),
+            other => other?
+        };
+
+        match self.get_mut(&from).set_eq_expl(EqExpl::ProofOfRewrite { id: to }) {
+            Err(Error::EqExplNotForApp(_, _)) => Ok(()),
+            other => other,
+        }
+    }
+
+    fn proof_mono_blame(&mut self, arguments: &Vec<Id>, conclusion: &Id) -> Result<()> {
+        let (from, to) = {
+            let conclusion = self.get(conclusion);
+
+            match conclusion {
+                Term::App { decl, args, .. }
+                if (decl == "=" || decl == "~") && args.len() == 2 => {
+                    (args[0].clone(), args[1].clone())
+                },
+
+                other => return Err(Error::WrongProofShape(conclusion.clone())),
+            }
+        };
+
+        match self.get_mut(&to).set_reverse_monotonicity(from.clone()) {
+            Err(Error::ReverseMonoNotForApp(_, _)) => (),
+            other => other?
+        };
+
+        let substitutions = {
+            let conclusion = self.get(conclusion);
+            let from_term = self.get(&from);
+            let to_term = self.get(&to);
+
+            match (from_term, to_term) {
+                (Term::App { args: from_args, .. }, Term::App { args: to_args, .. })
+                        if from_args.len() == to_args.len() => {
+                    from_args.iter().zip(to_args.iter())
+                        .map(|(from, to)| Substitution::Sub(from.clone(), to.clone()))
+                        .collect()
+                }
+                _ => return Err(Error::WrongProofShape(conclusion.clone())),
+            }
+        };
+
+        match self.get_mut(&from).set_eq_expl(EqExpl::ProofOfCongruence { args: substitutions, id: to }) {
+            Err(Error::EqExplNotForApp(_, _)) => Ok(()),
+            other => other,
+        }
+    }
+
     pub fn process(&mut self, entry: Entry) -> Result<()> {
         match entry {
             Entry::ToolVersion(_, _, _) => {},
@@ -421,10 +552,21 @@ impl State {
                 self.insert(id, Term::App { decl, args: self.new_ids(args)?, meta: None })?,
             Entry::MkProof { id, decl, premises, conclusion } => {
                 let conclusion = self.new_id(conclusion)?;
-                if decl.as_str() == "asserted" {
-                    self.set_blame_recursive(&conclusion, Blame::Assertion);
+                let premises = self.new_ids(premises)?;
+
+                match decl.as_str() {
+                    "asserted" => self.set_blame_recursive(&conclusion, Blame::Assertion),
+
+                    // All terms gain an appropriate equality explanation for patterns explicitly,
+                    // except when they don't. Some types of rewrite are not reported, but do occur
+                    // in proof trees as rewrite or monotonicity steps, so we account those as
+                    // an equality explanation as well.
+                    "rewrite" | "rewrite*" => self.proof_rewrite_blame(&premises, &conclusion)?,
+                    "monotonicity" => self.proof_mono_blame(&premises, &conclusion)?,
+                    _ => {},
                 }
-                self.insert(id, Term::Proof { decl, premises: self.new_ids(premises)?, conclusion })?
+
+                self.insert(id, Term::Proof { decl, premises, conclusion })?
             },
             Entry::MkLambda { id, name, decls, patterns, body } => {
                 let decls = iter::repeat(Decl::None).take(decls).collect();
@@ -486,18 +628,66 @@ impl State {
                     blame: self.new_substitutions(blame)?,
                 }))?;
             },
-            Entry::Instance { ptr, proof, generation } => {
+            Entry::Instance { ptr, id, generation } => {
                 let instance = self.pending_instances.remove(&ptr).ok_or(Error::NoSuchInstance(ptr))?;
-                self.current_instance.push(instance);
+                let body = match id {
+                    None => None,
+                    Some(id) => {
+                        let mut id = self.new_id(id)?;
+
+                        match self.get(&id) {
+                            Term::Proof { decl, premises, conclusion } if decl == "quant-inst" && premises.len() == 0 => {
+                                match self.get(conclusion) {
+                                    Term::App { decl, args, .. } if decl == "or" && args.len() == 2 => {
+                                        println!("Body: {}", self.view_id(&args[1]));
+                                        id = args[1].clone();
+                                    }
+                                    _ => {},
+                                }
+                            }
+                            _ => {},
+                        }
+
+                        Some(id)
+                    }
+                };
+                self.current_instance.push((instance, body));
             },
             Entry::AttachEnode { id, generation } => {
                 match self.current_instance.last() {
                     None => {
                         // TODO why are there floating e-nodes?
                     },
-                    Some(instance) => {
+                    Some((instance, body)) => {
                         let inst = instance.clone();
-                        self.get_mut(&self.new_id(id)?).set_blame(Blame::Instantiation(inst))?
+                        let id = self.new_id(id)?;
+
+                        let concrete_id: Option<Id> = match body {
+                            None => {
+                                println!("!!! attach-enode without body !!!");
+                                None
+                            },
+                            Some(body) => {
+                                let mut concrete_term = Some(&id);
+
+                                if !self.term_contains_term(body, &id) {
+                                    println!("!!! Term {} is not in quantifier body {} !!!", self.view_id(body), self.view_id(&id));
+                                }
+
+                                while concrete_term.is_some() && !self.term_contains_term(body, concrete_term.unwrap()) {
+                                    println!(">>>> {}", self.view_id(concrete_term.unwrap()));
+                                    concrete_term = self.get(concrete_term.unwrap()).get_reverse_monotonicity().as_ref();
+                                }
+
+                                concrete_term.map(|id| id.clone())
+                            },
+                        };
+
+                        if let Some(id) = concrete_id {
+                            self.get_mut(&id).set_blame(Blame::Instantiation(inst.clone()))?;
+                        }
+
+                        self.get_mut(&id).set_blame(Blame::Instantiation(inst))?;
                     }
                 }
             },

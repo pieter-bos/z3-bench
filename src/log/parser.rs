@@ -87,7 +87,7 @@ pub enum Entry {
     EqExpl { id: Id, explanation: EqExpl, },
     TheoryInstanceDiscovered { ptr: String, axiom: Id, bindings: Vec<Id>, blame: Vec<Id> },
     MbqiInstanceDiscovered { ptr: String, id: Id, bindings: Vec<Id> },
-    Instance { ptr: String, proof: Option<Id>, generation: Option<u64> },
+    Instance { ptr: String, id: Option<Id>, generation: Option<u64> },
     EndOfInstance,
     AttachEnode { id: Id, generation: u64 },
     DecideAndOr(Id, Id),
@@ -637,13 +637,13 @@ impl<R: Read> Parser<R> {
 
     fn next_instance(&mut self) -> Result<Entry> {
         let ptr = self.expect_pointer()?;
-        let proof = self.read_with(|tok| match tok {
+        let id = self.read_with(|tok| match tok {
             Identifier(id) => Ok(id),
             tok => Err(tok),
         })?;
         let have_semi = self.read_if(|tok| tok == &Punct(';'))?.is_some();
         let generation = if have_semi { Some(self.expect_u64()?) } else { None };
-        Ok(Entry::Instance { ptr, proof, generation })
+        Ok(Entry::Instance { ptr, id, generation })
     }
 
     fn next_new_match(&mut self) -> Result<Entry> {

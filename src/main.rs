@@ -10,7 +10,7 @@ use std::fs::File;
 use std::path::Path;
 use interprocess::local_socket::{LocalSocketListener, LocalSocketStream};
 use crate::log::parser::Parser;
-use crate::log::state::State;
+use crate::log::state::{Error, State};
 
 const SOCKET_NAME: &'static str = "z3-bench.socket";
 
@@ -25,12 +25,25 @@ fn read_file(path: &'static str) {
         for err in errs {
             println!("{:?}", err);
         }
-        state.process(entry).unwrap();
+        match state.process(entry) {
+            Ok(_) => {}
+            Err(err) => {
+                match err {
+                    Error::TermWithoutBlame(term) => {
+                        println!("This term does not have a blame:");
+                        println!("{}", state.view_term(&term));
+                    }
+                    other => println!("{:?}", other)
+                }
+                return
+            },
+        }
     }
 }
 
+#[allow(unreachable_code)]
 fn main() {
-    read_file("/home/pieter/Downloads/z3(3).log");
+    read_file("/home/pieter/vercors/z3.log");
     return;
 
     let path = env::temp_dir().join(Path::new(SOCKET_NAME));
