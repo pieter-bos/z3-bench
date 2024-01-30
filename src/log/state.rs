@@ -52,7 +52,14 @@ pub enum Substitution {
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub enum Instantiation {
+pub struct Instantiation {
+    body: Option<Id>,
+    bindings: Vec<Id>,
+    inst: InstantiationKind,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub enum InstantiationKind {
     Match(MatchInstantiation),
     Theory(TheoryInstantiation),
     Model(ModelInstantiation),
@@ -61,7 +68,6 @@ pub enum Instantiation {
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct MatchInstantiation {
     quantifier: Id,
-    bindings: Vec<Id>,
     pattern: Id,
     blame: Vec<Substitution>,
 }
@@ -69,14 +75,12 @@ pub struct MatchInstantiation {
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct TheoryInstantiation {
     family: lexer::Id,
-    bindings: Vec<Id>,
     blame: Vec<Id>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct ModelInstantiation {
     quantifier: Id,
-    bindings: Vec<Id>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -129,7 +133,7 @@ impl Term {
         }
     }
 
-    fn get_blame(&self) -> &Option<Blame> {
+    pub(crate) fn get_blame(&self) -> &Option<Blame> {
         match self {
             Term::App { meta, .. } => match meta {
                 None => &None,
@@ -208,7 +212,8 @@ pub struct State {
     family_terms: HashMap<String, Term>,
 
     pending_instances: HashMap<String, Instantiation>,
-    current_instance: Vec<(Instantiation, Option<Id>)>,
+    current_instance: Vec<Instantiation>,
+    floating_enodes: Vec<Id>,
 
     eq_expl: HashMap<Id, EqExpl>,
 }
@@ -221,11 +226,12 @@ impl State {
             family_terms: HashMap::new(),
             pending_instances: HashMap::new(),
             current_instance: Vec::new(),
+            floating_enodes: Vec::new(),
             eq_expl: HashMap::new(),
         }
     }
 
-    fn get(&self, id: &Id) -> &Term {
+    pub(crate) fn get(&self, id: &Id) -> &Term {
         match id {
             Id::Num(n) => self.num_terms[*n].as_ref().unwrap(),
             Id::Qualified(family, n) => self.qualified_terms[family][*n].as_ref().unwrap(),
@@ -361,7 +367,32 @@ impl State {
         // try to follow reverse monotonicity steps for that term and add a (Sub::Sub) for that
         // replacement. The new top term should be the found top term that occurs in the body of
         // the blamed instantiation.
-        subs.into_iter().map(|sub| self.new_substitution(sub)).collect::<Result<Vec<Substitution>>>()
+        let mut result: Vec<Substitution> = Vec::new();
+        for sub in subs.into_iter() {
+            match sub {
+                parser::Substitution::None(top_id) => {
+                    let mut top_id = self.new_id(top_id)?;
+                    let top_term = self.get(&top_id);
+                    let blame = top_term.get_blame();
+                    match blame {
+                        Some(Blame::Instantiation(Instantiation { body: Some(body), .. })) => {
+                            while !self.term_contains_term(body, &top_id) {
+                                println!(">>>> Replacing {}", self.view_id(&top_id));
+                                match self.get(&top_id).get_reverse_monotonicity().as_ref() {
+                                    None => break,
+                                    Some(id) => top_id = id.clone(),
+                                }
+                            }
+                        },
+                        _ => {},
+                    }
+                    result.push(Substitution::None(top_id));
+                }
+                sub => result.push(self.new_substitution(sub)?),
+            }
+        }
+        Ok(result)
+        // subs.into_iter().map(|sub| self.new_substitution(sub)).collect::<Result<Vec<Substitution>>>()
     }
 
     fn insert(&mut self, id: lexer::Id, term: Term) -> Result<()> {
@@ -411,8 +442,9 @@ impl State {
         println!("{}{}", indent, self.view_id(term));
         match self.get(term).get_blame() {
             None => {
-                println!("{:?}", self.get(term).get_reverse_monotonicity());
+                println!("{}rev-mono = {:?}", indent, self.get(term).get_reverse_monotonicity());
                 return Err(Error::TermWithoutBlame(self.get(term).clone()))
+                // return Ok(())
             },
             Some(blame) => {
                 match blame {
@@ -493,53 +525,33 @@ impl State {
     fn explain_inst(&self, inst: &Instantiation, indent_size: usize) -> Result<()> {
         let indent: String = "  ".repeat(indent_size);
 
+        let body = &inst.body;
+        let bindings = &inst.bindings;
+        let inst = &inst.inst;
+
         match inst {
-            Instantiation::Match(MatchInstantiation { quantifier, bindings, pattern, blame }) => {
-                let mut match_term: Vec<&Term> = Vec::new();
+            InstantiationKind::Match(MatchInstantiation { quantifier, pattern, blame }) => {
+                println!("{}{}", indent, self.view_id(quantifier));
+                self.print_bindings(quantifier, bindings, &indent)?;
+                println!("{}pattern: {}", indent, self.view_id(pattern));
+
                 for sub in blame {
-                    match sub {
-                        Substitution::None(id) => match_term.push(self.get(id)),
-                        Substitution::Sub(_, _) => {},
-                    }
-                }
-
-                let mut pattern_term: Vec<&Term> = Vec::new();
-                match self.get(pattern) {
-                    Term::App { decl, args, .. } if decl == "pattern" => {
-                        for arg in args {
-                            pattern_term.push(self.get(arg));
-                        }
-                    }
-                    _ => {}
-                };
-
-                let mut ok = true;
-
-                for (match_term, pattern_term) in match_term.iter().zip(pattern_term.iter()) {
-                    match (match_term, pattern_term) {
-                        (Term::App { decl: match_decl, .. }, Term::App { decl: pattern_decl, .. }) => {
-                            if match_decl != pattern_decl {
-                                ok = false
-                            }
-                        }
-                        _ => ok = false,
-                    }
-                }
-
-                if !ok {
-                    println!("{}{}", indent, self.view_id(quantifier));
-                    self.print_bindings(quantifier, bindings, &indent)?;
-                    println!("{}pattern: {}", indent, self.view_id(pattern));
-
-                    for sub in blame {
-                        self.explain_substitution(sub, indent_size)?;
-                    }
+                    self.explain_substitution(sub, indent_size)?;
                 }
             }
-            Instantiation::Theory(TheoryInstantiation { family, bindings, blame }) => {
+            InstantiationKind::Theory(TheoryInstantiation { family, blame }) => {
+                if let Some(body) = body.as_ref() {
+                    println!("from theory {:?}: {}", family, self.view_id(body));
+                } else {
+                    println!("from theory {:?}: ??", family);
+                }
+
+                for sub in blame {
+                    self.explain_substitution(&Substitution::None(sub.clone()), indent_size)?;
+                }
                 // println!("{}(theory instantiation)", indent)
             }
-            Instantiation::Model(ModelInstantiation { quantifier, bindings }) => {
+            InstantiationKind::Model(ModelInstantiation { quantifier }) => {
                 println!("{}model instantiation:", indent);
                 println!("{}{}", indent, self.view_id(quantifier));
                 self.print_bindings(quantifier, bindings, &indent)?;
@@ -550,8 +562,6 @@ impl State {
     }
 
     fn insert_instantiation(&mut self, ptr: String, inst: Instantiation) -> Result<()> {
-        self.explain_inst(&inst, 0)?;
-
         match self.pending_instances.insert(ptr.clone(), inst.clone()) {
             None => Ok(()),
             Some(other) => {
@@ -641,7 +651,10 @@ impl State {
                 let premises = self.new_ids(premises)?;
 
                 match decl.as_str() {
-                    "asserted" => self.set_blame_recursive(&conclusion, Blame::Assertion),
+                    "asserted" => {
+                        println!(">>blame asserted {}", self.view_id(&conclusion));
+                        self.set_blame_recursive(&conclusion, Blame::Assertion)
+                    },
 
                     // All terms gain an appropriate equality explanation for patterns explicitly,
                     // except when they don't. Some types of rewrite are not reported, but do occur
@@ -694,29 +707,43 @@ impl State {
                 // println!("{}", self.view_id(&self.new_id(id2)?));
             },
             Entry::TheoryInstanceDiscovered { ptr, axiom, bindings, blame } => {
-                self.insert_instantiation(ptr, Instantiation::Theory(TheoryInstantiation {
-                    family: axiom,
+                let inst = Instantiation {
+                    body: None,
                     bindings: self.new_ids(bindings)?,
-                    blame: self.new_ids(blame)?,
-                }))?;
+                    inst: InstantiationKind::Theory(TheoryInstantiation {
+                        family: axiom,
+                        blame: self.new_ids(blame)?,
+                    })
+                };
+                self.insert_instantiation(ptr, inst)?;
             },
             Entry::MbqiInstanceDiscovered { ptr, id, bindings } => {
-                self.insert_instantiation(ptr, Instantiation::Model(ModelInstantiation {
-                    quantifier: self.new_id(id)?,
+                let inst = Instantiation {
+                    body: None,
                     bindings: self.new_ids(bindings)?,
-                }))?;
+                    inst: InstantiationKind::Model(ModelInstantiation {
+                        quantifier: self.new_id(id)?,
+                    })
+                };
+                self.insert_instantiation(ptr, inst)?;
             },
             Entry::NewMatch { ptr, id, pattern, bindings, blame } => {
-                self.insert_instantiation(ptr, Instantiation::Match(MatchInstantiation {
-                    quantifier: self.new_id(id)?,
+                let inst = Instantiation {
+                    body: None,
                     bindings: self.new_ids(bindings)?,
-                    pattern: self.new_id(pattern)?,
-                    blame: self.new_substitutions(blame)?,
-                }))?;
+                    inst: InstantiationKind::Match(MatchInstantiation {
+                        quantifier: self.new_id(id)?,
+
+                        pattern: self.new_id(pattern)?,
+                        blame: self.new_substitutions(blame)?,
+                    })
+                };
+                self.insert_instantiation(ptr, inst)?;
             },
             Entry::Instance { ptr, id, generation } => {
-                let instance = self.pending_instances.remove(&ptr).ok_or(Error::NoSuchInstance(ptr))?;
-                let body = match id {
+                let mut instance = self.pending_instances.remove(&ptr).ok_or(Error::NoSuchInstance(ptr))?;
+
+                instance.body = match id {
                     None => None,
                     Some(id) => {
                         let mut id = self.new_id(id)?;
@@ -737,18 +764,35 @@ impl State {
                         Some(id)
                     }
                 };
-                self.current_instance.push((instance, body));
+
+                let floating_enodes = std::mem::replace(&mut self.floating_enodes, Vec::new());
+
+                for node in floating_enodes.into_iter() {
+                    if instance.body.is_some() && self.term_contains_term(instance.body.as_ref().unwrap(), &node) {
+                        println!("!!! floating attach-enode recovered: {}", self.view_id(&node));
+                        let term = self.get_mut(&node);
+                        if term.get_blame().is_none() {
+                            term.set_blame(Blame::Instantiation(instance.clone()));
+                        }
+                    } else {
+                        println!("!!! floating attach-enode NOT FOUND: {}", self.view_id(&node));
+                    }
+                }
+
+                self.floating_enodes.clear();
+
+                self.explain_inst(&instance, 0)?;
+
+                self.current_instance.push(instance);
             },
             Entry::AttachEnode { id, generation } => {
                 match self.current_instance.last() {
-                    None => {
-                        // TODO why are there floating e-nodes?
-                    },
-                    Some((instance, body)) => {
+                    None => self.floating_enodes.push(self.new_id(id)?),
+                    Some(instance) => {
                         let inst = instance.clone();
                         let id = self.new_id(id)?;
 
-                        let concrete_id: Option<Id> = match body {
+                        let concrete_id: Option<Id> = match &inst.body {
                             None => {
                                 println!("!!! attach-enode without body !!!");
                                 None
@@ -770,9 +814,11 @@ impl State {
                         };
 
                         if let Some(id) = concrete_id {
+                            println!(">>blame inst {}", self.view_id(&id));
                             self.get_mut(&id).set_blame(Blame::Instantiation(inst.clone()))?;
                         }
 
+                        println!(">>blame inst {}", self.view_id(&id));
                         self.get_mut(&id).set_blame(Blame::Instantiation(inst))?;
                     }
                 }

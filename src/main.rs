@@ -10,7 +10,7 @@ use std::fs::File;
 use std::path::Path;
 use interprocess::local_socket::{LocalSocketListener, LocalSocketStream};
 use crate::log::parser::Parser;
-use crate::log::state::{Error, State};
+use crate::log::state::{Blame, Error, State, Term};
 
 const SOCKET_NAME: &'static str = "z3-bench.socket";
 
@@ -35,6 +35,27 @@ fn read_file(path: &'static str) {
                     Error::TermWithoutBlame(term) => {
                         println!("This term does not have a blame:");
                         println!("{}", state.view_term(&term));
+
+                        fn inner_blame(state: &State, term: &Term) {
+                            match term {
+                                Term::App { args, .. } => {
+                                    for arg in args {
+                                        let term = state.get(arg);
+                                        match term.get_blame() {
+                                            None => inner_blame(state, term),
+                                            Some(blame) => {
+                                                println!("Blame for {}", state.view_term(term));
+                                                println!("  {:?}", blame);
+                                                inner_blame(state, term);
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {},
+                            }
+                        }
+
+                        inner_blame(&state, &term);
                     }
                     other => println!("{:?}", other)
                 }
@@ -46,7 +67,7 @@ fn read_file(path: &'static str) {
 
 #[allow(unreachable_code)]
 fn main() {
-    read_file("/home/pieter/vercors/z3.log");
+    read_file("/home/pieter/vercors/z3-1.log");
     return;
 
     let path = env::temp_dir().join(Path::new(SOCKET_NAME));
